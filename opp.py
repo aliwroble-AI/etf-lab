@@ -18,13 +18,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Słownik przykładowych tickerów dla użytkownika
-DEFAULT_TICKERS = {
-    "S&P 500 ESG (Podobny do UBS Prime Value ESG)": "ESGU",
-    "S&P 500 (Rynek szeroki)": "SPY",
-    "Nasdaq 100 (Technologia)": "QQQ",
-    "Złoto (Gold Trust)": "GLD",
-    "Obligacje 20+ Lat (Treasury)": "TLT"
+# Słownik prawdziwych ETF-ów dla użytkownika
+REAL_ETFS = {
+    "SPY": "SPDR S&P 500 ETF Trust (Szeroki rynek USA)",
+    "QQQ": "Invesco QQQ Trust (Sektor Technologiczny)",
+    "GLD": "SPDR Gold Shares (Złoto fizyczne)",
+    "TLT": "iShares 20+ Year Treasury Bond (Obligacje skarbowe USA)",
+    "XLF": "Financial Select Sector SPDR (Sektor Finansowy)",
+    "USO": "United States Oil Fund (Ropa Naftowa)",
+    "VNQ": "Vanguard Real Estate Index Fund (Nieruchomości REIT)"
 }
 
 # ==========================================
@@ -151,31 +153,34 @@ def anonymize_csv(df):
 st.sidebar.title("🛠️ Parametry Laboratorium")
 st.sidebar.markdown("Skonfiguruj środowisko testowe.")
 
-selected_asset_name = st.sidebar.selectbox("Wybierz badany ETF:", list(DEFAULT_TICKERS.keys()))
-MAIN_TICKER = DEFAULT_TICKERS[selected_asset_name]
+selected_ticker = st.sidebar.selectbox("Wybierz badany ETF:", list(REAL_ETFS.keys()), format_func=lambda x: f"{x} - {REAL_ETFS[x]}")
+MAIN_TICKER = selected_ticker
 
 # Możliwość wpisania własnego tickera
 custom_ticker = st.sidebar.text_input("...lub wpisz własny Ticker (np. AAPL, VTI):", "")
 if custom_ticker:
     MAIN_TICKER = custom_ticker.upper()
 
-start_date = st.sidebar.date_input("Data początkowa:", datetime.today() - timedelta(days=365))
-end_date = st.sidebar.date_input("Data końcowa:", datetime.today())
-
 st.sidebar.markdown("---")
 st.sidebar.info("💡 **Cel edukacyjny:** Zrozum, dlaczego ceny ETF zmieniają się pod wpływem wydarzeń rynkowych i jak budować odporny portfel inwestycyjny.")
 
-# Pobieranie głównych danych
+# Pobieranie głównych danych (sztywne okno 2 lat wstecz dla płynności analizy)
+end_date = datetime.today()
+start_date = end_date - timedelta(days=730)
 df_main = get_stock_data(MAIN_TICKER, start_date, end_date)
+
+# Ujednolicenie strefy czasowej (naprawia błędy z indeksowaniem dat)
+if not df_main.empty:
+    df_main.index = df_main.index.tz_localize(None)
 
 # ==========================================
 # GŁÓWNA STRONA APLIKACJI
 # ==========================================
 st.title("🔬 Laboratorium Hipotez Inwestycyjnych")
-st.markdown(f"**Analizowany walor:** `{MAIN_TICKER}` | **Okres:** {start_date} do {end_date}")
+st.markdown(f"**Analizowany walor:** `{MAIN_TICKER}` | **Dostępna historia:** 2 lata wstecz")
 
 if df_main.empty:
-    st.error("Brak danych dla wybranego tickera lub zakresu dat. Spróbuj zmienić parametry.")
+    st.error("Brak danych dla wybranego tickera. Spróbuj zmienić parametry w panelu bocznym.")
     st.stop()
 
 # TABS - Podział na moduły
@@ -193,41 +198,31 @@ with tab1:
     st.header("Piaskownica Hipotez (Event-Driven Analysis)")
     st.markdown("""
     Ceny funduszy ETF reagują na dane makroekonomiczne i wydarzenia na świecie. 
-    **Zbadaj konkretny dzień**, aby sprawdzić, co wywołało ruchy cenowe.
+    **Wybierz datę wydarzenia**, aby sprawdzić, co wywołało ruchy cenowe w tamtym okresie.
     """)
-    
-    # Wykres świecowy
-    fig_candle = go.Figure(data=[go.Candlestick(x=df_main.index,
-                    open=df_main['Open'],
-                    high=df_main['High'],
-                    low=df_main['Low'],
-                    close=df_main['Close'])])
-    fig_candle.update_layout(title=f"Notowania {MAIN_TICKER}", xaxis_rangeslider_visible=False, height=400)
-    st.plotly_chart(fig_candle, use_container_width=True)
     
     col1, col2 = st.columns([1, 1])
     
     with col1:
         st.subheader("1. Wybierz wydarzenie")
-        event_date = st.date_input("Wybierz datę (z widocznego wykresu):", value=df_main.index[-1].date() if not df_main.empty else datetime.today())
-        event_date = pd.to_datetime(event_date)
+        event_date = st.date_input("Analizowana data:", value=datetime.today().date() - timedelta(days=5))
+        event_date_dt = pd.to_datetime(event_date)
         
         user_hypothesis = st.text_area("Twoja Hipoteza Inwestycyjna:", placeholder="Np. Uważam, że cena tego dnia spadła z powodu publikacji wysokich odczytów inflacji CPI...")
         
     with col2:
         st.subheader("2. Weryfikacja Rynkowa")
         if st.button("Sprawdź Hipotezę 🚀"):
-            # Szukanie danych dla tej daty
             try:
-                # Szukamy najbliższej dostępnej daty sesyjnej
-                idx = df_main.index.get_indexer([event_date], method='nearest')[0]
+                # Szukamy najbliższej dostępnej daty sesyjnej (usunięcie problemu z weekendami)
+                idx = df_main.index.get_indexer([event_date_dt], method='nearest')[0]
                 actual_date = df_main.index[idx]
                 
                 close_price = df_main.iloc[idx]['Close']
                 open_price = df_main.iloc[idx]['Open']
                 pct_change = (close_price - open_price) / open_price
                 
-                st.metric(label=f"Zmiana ceny w dniu {actual_date.strftime('%Y-%m-%d')}", 
+                st.metric(label=f"Zmiana ceny w najbliższym dniu sesyjnym: {actual_date.strftime('%Y-%m-%d')}", 
                           value=f"${close_price:.2f}", 
                           delta=f"{pct_change*100:.2f}%")
                 
@@ -249,7 +244,26 @@ with tab1:
                     st.info("Pamiętaj: Rynki są złożone. Czasami na dany ETF wpływa specyficzny sektor w nim zawarty, a nie cała gospodarka. Sprawdź 'Moduł 2: Detektyw Składu'.")
 
             except Exception as e:
-                st.error("Wystąpił błąd podczas analizy daty. Upewnij się, że data mieści się w pobranym zakresie.")
+                st.error(f"Wystąpił błąd podczas analizy daty: {e}")
+
+    # Wykres świecowy wyświetlany pod spodem
+    st.markdown("---")
+    st.subheader(f"🔍 Podgląd sytuacji na wykresie (okno wokół {event_date.strftime('%Y-%m-%d')})")
+    
+    fig_candle = go.Figure(data=[go.Candlestick(x=df_main.index,
+                    open=df_main['Open'],
+                    high=df_main['High'],
+                    low=df_main['Low'],
+                    close=df_main['Close'])])
+                    
+    # Dynamiczne przybliżenie osi X do wybranej daty (+/- 30 dni)
+    fig_candle.update_xaxes(range=[event_date_dt - timedelta(days=30), event_date_dt + timedelta(days=30)])
+    fig_candle.update_layout(title=f"Notowania {MAIN_TICKER}", xaxis_rangeslider_visible=False, height=400)
+    
+    # Dodanie pionowej linii wskazującej wybrane wydarzenie
+    fig_candle.add_vline(x=event_date_dt, line_width=2, line_dash="dash", line_color="orange", annotation_text="Wybrana data")
+    
+    st.plotly_chart(fig_candle, use_container_width=True)
 
 # ------------------------------------------
 # MODUŁ 2: DETEKTYW SKŁADU
@@ -300,10 +314,15 @@ with tab3:
     **Współczynnik korelacji** (od -1 do 1) pomoże Ci ocenić, czy Twój portfel jest bezpieczny podczas kryzysu.
     """)
     
+    # Lista opcji z uwzględnieniem prawdziwych ETFów
+    options_list = list(REAL_ETFS.keys())
+    if MAIN_TICKER in options_list:
+        options_list.remove(MAIN_TICKER)
+        
     compare_tickers = st.multiselect(
         "Wybierz aktywa do porównania (domyślnie dodano Złoto i Obligacje US):",
-        options=["QQQ", "SPY", "DIA", "IWM", "GLD", "TLT", "USO", "VNQ"],
-        default=["GLD", "TLT", "QQQ"]
+        options=options_list,
+        default=["GLD", "TLT"] if all(x in options_list for x in ["GLD", "TLT"]) else []
     )
     
     if compare_tickers:
@@ -318,10 +337,18 @@ with tab3:
                                  title="Macierz Korelacji Dziennych Stóp Zwrotu")
             st.plotly_chart(fig_corr, use_container_width=True)
             
-            st.markdown("### 📖 Jak czytać tę macierz?")
-            st.write("- **Blisko +1.0 (Kolor Czerwony):** Aktywa poruszają się identycznie. Brak dywersyfikacji (np. SPY i QQQ często mają korelacje > 0.8).")
-            st.write("- **Około 0.0 (Kolor Biały):** Brak związku. Dobry dodatek do portfela (często Złoto - GLD).")
-            st.write("- **Blisko -1.0 (Kolor Niebieski):** Aktywa poruszają się w przeciwnych kierunkach. Świetne zabezpieczenie na czas krachów (np. Obligacje Długoterminowe - TLT w czasie spadków akcji).")
+            col_desc, col_legend = st.columns([2, 1])
+            with col_desc:
+                st.markdown("### 📖 Jak czytać tę macierz?")
+                st.write("- **Blisko +1.0 (Kolor Czerwony):** Aktywa poruszają się identycznie. Brak dywersyfikacji (np. SPY i QQQ często mają korelacje > 0.8).")
+                st.write("- **Około 0.0 (Kolor Biały):** Brak związku. Dobry dodatek do portfela (często Złoto - GLD).")
+                st.write("- **Blisko -1.0 (Kolor Niebieski):** Aktywa poruszają się w przeciwnych kierunkach. Świetne zabezpieczenie na czas krachów (np. Obligacje Długoterminowe - TLT w czasie spadków akcji).")
+            
+            with col_legend:
+                st.markdown("### 🏷️ Legenda Tickerów:")
+                for tick, desc in REAL_ETFS.items():
+                    if tick == MAIN_TICKER or tick in compare_tickers:
+                        st.caption(f"**{tick}**: {desc}")
     else:
         st.warning("Wybierz przynajmniej jedno aktywo do porównania.")
 
