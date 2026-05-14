@@ -20,6 +20,7 @@ st.set_page_config(
 
 # Słownik prawdziwych ETF-ów dla użytkownika
 REAL_ETFS = {
+    "UPVU.DE": "UBS Factor MSCI USA Prime Value ESG UCITS (EUR)",
     "SPY": "SPDR S&P 500 ETF Trust (Szeroki rynek USA)",
     "QQQ": "Invesco QQQ Trust (Sektor Technologiczny)",
     "GLD": "SPDR Gold Shares (Złoto fizyczne)",
@@ -35,13 +36,15 @@ REAL_ETFS = {
 
 @st.cache_data(ttl=3600)
 def get_stock_data(ticker, start_date, end_date):
-    """Pobiera historyczne dane cenowe dla wybranego tickera."""
+    """Pobiera historyczne dane cenowe (kuloodporna metoda)."""
     try:
-        data = yf.download(ticker, start=start_date, end=end_date)
-        # FIX: Nowe wersje yfinance zwracają strukturę MultiIndex, która psuje wykresy.
-        # Spłaszczamy kolumny, aby były prostymi nazwami ('Open', 'Close' itp.)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
+        t = yf.Ticker(ticker)
+        data = t.history(start=start_date, end=end_date)
+        
+        if not data.empty:
+            # Usuwamy strefy czasowe, by uniknąć konfliktów na osi X
+            if data.index.tz is not None:
+                data.index = data.index.tz_localize(None)
         return data
     except Exception as e:
         st.error(f"Błąd podczas pobierania danych dla {ticker}: {e}")
@@ -50,22 +53,25 @@ def get_stock_data(ticker, start_date, end_date):
 @st.cache_data(ttl=3600)
 def get_etf_sectors(ticker):
     """
-    Pobiera wagi sektorowe dla ETF. 
-    (Fallback: jeśli yfinance nie zwróci danych dla specyficznego ETF, generuje przybliżone dane edukacyjne).
+    Pobiera wagi sektorowe dla ETF lub sektor pojedynczej spółki (np. AAPL).
     """
     try:
         t = yf.Ticker(ticker)
         info = t.info
         
-        # Próba pobrania rzeczywistych wag sektorowych (często niedostępne w darmowym API)
+        # Jeśli wpisano zwykłą spółkę (jak AAPL) - przypisz jej 100% jej sektora
+        if 'sector' in info and info['sector']:
+            return pd.Series({info['sector']: 1.0})
+        
+        # Jeśli to ETF, pobierz rzeczywiste wagi sektorowe
         if 'sectorWeightings' in info and info['sectorWeightings']:
             sectors = {list(s.keys())[0]: list(s.values())[0] for s in info['sectorWeightings']}
             return pd.Series(sectors)
         
-        # Fallback edukacyjny oparty na charakterze ETF
+        # Fallback edukacyjny oparty na charakterze znanych ETF
         if ticker in ["QQQ", "XLK"]:
             return pd.Series({"Technologia": 0.55, "Komunikacja": 0.18, "Dobra konsumpcyjne": 0.15, "Ochrona zdrowia": 0.05, "Inne": 0.07})
-        elif ticker in ["ESGU", "SPY"]:
+        elif ticker in ["ESGU", "SPY", "UPVU.DE"]:
             return pd.Series({"Technologia": 0.28, "Ochrona zdrowia": 0.14, "Finanse": 0.13, "Dobra konsumpcyjne": 0.11, "Przemysł": 0.08, "Inne": 0.26})
         elif ticker == "GLD":
             return pd.Series({"Metale szlachetne": 1.0})
@@ -76,24 +82,26 @@ def get_etf_sectors(ticker):
 
 @st.cache_data(ttl=3600)
 def calculate_correlations(base_ticker, comp_tickers, start_date, end_date):
-    """Oblicza macierz korelacji dla wybranych aktywów."""
+    """Oblicza macierz korelacji bez podatności na błędy MultiIndex w Yahoo Finance."""
     tickers = [base_ticker] + comp_tickers
-    data = yf.download(tickers, start=start_date, end=end_date)
+    df_list = []
     
-    # FIX: Bezpieczne pobranie kolumny 'Close' niezależnie od wersji yfinance
-    if isinstance(data.columns, pd.MultiIndex):
-        close_data = data['Close']
-    else:
-        close_data = data[['Close']]
+    # Pobieramy każdego tickera osobno i łączymy - omija to błędy nowych wersji YF
+    for t in tickers:
+        hist = get_stock_data(t, start_date, end_date)
+        if not hist.empty and 'Close' in hist.columns:
+            series = hist['Close'].rename(t)
+            df_list.append(series)
+            
+    if not df_list:
+        return pd.DataFrame()
         
+    close_data = pd.concat(df_list, axis=1)
     return close_data.corr()
 
 @st.cache_data
 def simulate_historical_news(ticker, date, price_change_pct):
-    """
-    Symuluje wiadomości rynkowe dla dat historycznych na podstawie rzeczywistej zmiany ceny.
-    W prawdziwej aplikacji produkcyjnej użyto by tutaj NewsAPI / EODHD API.
-    """
+    """Symuluje wiadomości rynkowe w celach edukacyjnych."""
     date_str = date.strftime("%Y-%m-%d")
     
     positive_news = [
@@ -121,10 +129,7 @@ def simulate_historical_news(ticker, date, price_change_pct):
         return random.sample(neutral_news, 2)
 
 def analyze_sentiment(text):
-    """
-    Uproszczony analizator sentymentu oparty na słowach kluczowych.
-    (Zastępuje VADER/FinBERT w celu wyeliminowania ciężkich zależności zewnętrznych).
-    """
+    """Uproszczony analizator sentymentu oparty na słowach kluczowych."""
     text_lower = text.lower()
     pos_words = ['wzrost', 'optymizm', 'zyskuje', 'dobre', 'spadek inflacji', 'napędza', 'uspokaja', 'gołębi']
     neg_words = ['spadek', 'obawy', 'recesja', 'traci', 'słabe', 'wzrost inflacji', 'wyprzedaż', 'napięcia']
@@ -140,13 +145,11 @@ def anonymize_csv(df):
     """Anonimizuje wrażliwe dane z wgranego pliku CSV (historia transakcji)."""
     df_anon = df.copy()
     
-    # Usuwanie kolumn z ID/Danymi osobowymi
     cols_to_drop = [col for col in df_anon.columns if re.search(r'id|name|imię|nazwisko|pesel|account|konto', col.lower())]
     df_anon.drop(columns=cols_to_drop, inplace=True, errors='ignore')
     
-    # Maskowanie kwot finansowych (mnożenie przez losowy skalar, zachowanie proporcji)
     money_cols = [col for col in df_anon.columns if re.search(r'kwota|amount|value|wartość|cena|price|saldo|balance', col.lower())]
-    scalar = random.uniform(0.1, 5.0) # Losowy skalar dla całej sesji
+    scalar = random.uniform(0.1, 5.0)
     for col in money_cols:
         try:
             df_anon[col] = (pd.to_numeric(df_anon[col], errors='coerce') * scalar).round(2)
@@ -161,27 +164,20 @@ def anonymize_csv(df):
 st.sidebar.title("🛠️ Parametry Laboratorium")
 st.sidebar.markdown("Skonfiguruj środowisko testowe.")
 
-selected_ticker = st.sidebar.selectbox("Wybierz badany ETF:", list(REAL_ETFS.keys()), format_func=lambda x: f"{x} - {REAL_ETFS[x]}")
+selected_ticker = st.sidebar.selectbox("Wybierz badany ETF/Aktywo:", list(REAL_ETFS.keys()), format_func=lambda x: f"{x} - {REAL_ETFS[x]}")
 MAIN_TICKER = selected_ticker
 
-# Możliwość wpisania własnego tickera
+# Możliwość wpisania własnego tickera (czyszczenie ze spacji)
 custom_ticker = st.sidebar.text_input("...lub wpisz własny Ticker (np. AAPL, VTI):", "")
 if custom_ticker:
-    MAIN_TICKER = custom_ticker.upper()
+    MAIN_TICKER = custom_ticker.upper().strip()
 
 st.sidebar.markdown("---")
-st.sidebar.info("💡 **Cel edukacyjny:** Zrozum, dlaczego ceny ETF zmieniają się pod wpływem wydarzeń rynkowych i jak budować odporny portfel inwestycyjny.")
+st.sidebar.info("💡 **Cel edukacyjny:** Zrozum, dlaczego ceny instrumentów finansowych zmieniają się pod wpływem wydarzeń rynkowych i jak budować odporny portfel.")
 
-# Pobieranie głównych danych (sztywne okno 2 lat wstecz dla płynności analizy)
-# FIX: używamy samego .date(), aby cache Streamlita działał prawidłowo (nie odświeżał się co milisekundę)
 end_date = datetime.today().date()
 start_date = end_date - timedelta(days=730)
 df_main = get_stock_data(MAIN_TICKER, start_date, end_date)
-
-# Ujednolicenie strefy czasowej (naprawia błędy z indeksowaniem dat)
-if not df_main.empty:
-    if df_main.index.tz is not None: # FIX: usuwamy strefę tylko, jeśli yfinance ją dodało
-        df_main.index = df_main.index.tz_localize(None)
 
 # ==========================================
 # GŁÓWNA STRONA APLIKACJI
@@ -190,10 +186,9 @@ st.title("🔬 Laboratorium Hipotez Inwestycyjnych")
 st.markdown(f"**Analizowany walor:** `{MAIN_TICKER}` | **Dostępna historia:** 2 lata wstecz")
 
 if df_main.empty:
-    st.error("Brak danych dla wybranego tickera. Spróbuj zmienić parametry w panelu bocznym.")
+    st.error(f"Brak danych dla tickera: {MAIN_TICKER}. Upewnij się, że wpisany symbol jest poprawny w bazie Yahoo Finance.")
     st.stop()
 
-# TABS - Podział na moduły
 tab1, tab2, tab3, tab4 = st.tabs([
     "🎯 Moduł 1: Piaskownica Hipotez", 
     "🔍 Moduł 2: Detektyw Składu", 
@@ -207,7 +202,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.header("Piaskownica Hipotez (Event-Driven Analysis)")
     st.markdown("""
-    Ceny funduszy ETF reagują na dane makroekonomiczne i wydarzenia na świecie. 
+    Ceny aktywów reagują na dane makroekonomiczne i wydarzenia na świecie. 
     **Wybierz datę wydarzenia**, aby sprawdzić, co wywołało ruchy cenowe w tamtym okresie.
     """)
     
@@ -224,19 +219,17 @@ with tab1:
         st.subheader("2. Weryfikacja Rynkowa")
         if st.button("Sprawdź Hipotezę 🚀"):
             try:
-                # Szukamy najbliższej dostępnej daty sesyjnej (usunięcie problemu z weekendami)
                 idx = df_main.index.get_indexer([event_date_dt], method='nearest')[0]
                 actual_date = df_main.index[idx]
                 
-                close_price = df_main.iloc[idx]['Close']
-                open_price = df_main.iloc[idx]['Open']
+                close_price = float(df_main.iloc[idx]['Close'])
+                open_price = float(df_main.iloc[idx]['Open'])
                 pct_change = (close_price - open_price) / open_price
                 
                 st.metric(label=f"Zmiana ceny w najbliższym dniu sesyjnym: {actual_date.strftime('%Y-%m-%d')}", 
                           value=f"${close_price:.2f}", 
                           delta=f"{pct_change*100:.2f}%")
                 
-                # Symulacja wiadomości i sentymentu
                 news_items = simulate_historical_news(MAIN_TICKER, actual_date, pct_change)
                 
                 st.markdown("### 📰 Nagłówki prasowe z tego dnia:")
@@ -247,16 +240,15 @@ with tab1:
                 st.markdown("---")
                 st.markdown("### 🧠 Feedback Edukacyjny:")
                 if pct_change < 0 and "inflacj" in user_hypothesis.lower():
-                    st.success("Trafna hipoteza! Strach przed inflacją historycznie wywołuje spadki na rynku akcji (wyższe stopy procentowe dyskontują przyszłe zyski spółek).")
+                    st.success("Trafna hipoteza! Strach przed inflacją historycznie wywołuje spadki na rynku akcji.")
                 elif pct_change > 0 and ("spadek" in user_hypothesis.lower() or "bessa" in user_hypothesis.lower()):
-                    st.warning("Rynek zareagował wzrostami, mimo Twojej negatywnej hipotezy. Często 'złe informacje' są już wliczone w cenę (tzw. priced-in) i rynek rośnie na fakcie ich publikacji.")
+                    st.warning("Rynek zareagował wzrostami, mimo Twojej negatywnej hipotezy. Często 'złe informacje' są już wliczone w cenę (tzw. priced-in).")
                 else:
-                    st.info("Pamiętaj: Rynki są złożone. Czasami na dany ETF wpływa specyficzny sektor w nim zawarty, a nie cała gospodarka. Sprawdź 'Moduł 2: Detektyw Składu'.")
+                    st.info("Pamiętaj: Rynki są złożone. Czasami na dany ETF/Spółkę wpływa specyficzny sektor, a nie cała gospodarka. Sprawdź 'Moduł 2: Detektyw Składu'.")
 
             except Exception as e:
                 st.error(f"Wystąpił błąd podczas analizy daty: {e}")
 
-    # Wykres świecowy wyświetlany pod spodem
     st.markdown("---")
     st.subheader(f"🔍 Podgląd sytuacji na wykresie (okno wokół {event_date.strftime('%Y-%m-%d')})")
     
@@ -266,11 +258,8 @@ with tab1:
                     low=df_main['Low'],
                     close=df_main['Close'])])
                     
-    # Dynamiczne przybliżenie osi X do wybranej daty (+/- 30 dni)
     fig_candle.update_xaxes(range=[event_date_dt - timedelta(days=30), event_date_dt + timedelta(days=30)])
     fig_candle.update_layout(title=f"Notowania {MAIN_TICKER}", xaxis_rangeslider_visible=False, height=400)
-    
-    # Dodanie pionowej linii wskazującej wybrane wydarzenie
     fig_candle.add_vline(x=event_date_dt, line_width=2, line_dash="dash", line_color="orange", annotation_text="Wybrana data")
     
     st.plotly_chart(fig_candle, use_container_width=True)
@@ -279,11 +268,8 @@ with tab1:
 # MODUŁ 2: DETEKTYW SKŁADU
 # ------------------------------------------
 with tab2:
-    st.header("Detektyw Składu (Constituents Explorer)")
-    st.markdown(f"""
-    Dlaczego {MAIN_TICKER} reaguje silnie na wiadomości o chipach AI, a słabo na ceny ropy? 
-    Odpowiedź kryje się w **strukturze sektorowej** funduszu. ETF to tylko "koszyk" - sprawdźmy, co jest w środku.
-    """)
+    st.header("Detektyw Składu / Sektora")
+    st.markdown(f"Zrozum, od jakich branż i sektorów zależny jest `{MAIN_TICKER}`.")
     
     col_pie, col_desc = st.columns([1, 1])
     
@@ -293,7 +279,7 @@ with tab2:
         fig_pie = px.pie(
             values=sectors.values, 
             names=sectors.index, 
-            title=f"Wagi Sektorowe w {MAIN_TICKER} (Estymacja)",
+            title=f"Ekspozycja Sektorowa dla {MAIN_TICKER}",
             hole=0.4,
             color_discrete_sequence=px.colors.sequential.Teal
         )
@@ -305,14 +291,14 @@ with tab2:
         top_weight = sectors.max() * 100
         
         st.write(f"- **Dominujący sektor:** `{top_sector}` ({top_weight:.1f}%)")
-        if top_sector == "Technologia":
-            st.info("Wysoka ekspozycja na Technologię oznacza, że ten ETF jest bardzo wrażliwy na decyzje stóp procentowych FED (spółki Growth) oraz wyniki gigantów rynkowych (Apple, Microsoft, NVIDIA).")
-        elif top_sector == "Finanse":
-            st.info("Sektor finansowy zazwyczaj zyskuje w środowisku rosnących stóp procentowych (wyższe marże odsetkowe banków), ale jest podatny na kryzysy płynnościowe.")
+        if "Tech" in top_sector or top_sector == "Technologia":
+            st.info("Wysoka ekspozycja na Technologię oznacza, że walor ten jest bardzo wrażliwy na decyzje stóp procentowych FED (spółki Growth) oraz wyniki gigantów rynkowych.")
+        elif top_sector == "Finanse" or "Financial" in top_sector:
+            st.info("Sektor finansowy zazwyczaj zyskuje w środowisku rosnących stóp procentowych (wyższe marże odsetkowe), ale jest podatny na kryzysy płynnościowe.")
         else:
-            st.info("Zdywersyfikowany lub specyficzny sektorowo fundusz. Analizując wiadomości, zwracaj szczególną uwagę na legislację i trendy konsumenckie dotyczące branży dominującej.")
+            st.info("Analizując wiadomości, zwracaj szczególną uwagę na legislację i trendy konsumenckie dotyczące branży dominującej.")
             
-        st.warning("⚠️ Skład ETF zmienia się w czasie (tzw. rebalancing). Zarządzający funduszem cyklicznie dostosowują wagi spółek do zadeklarowanego indeksu referencyjnego.")
+        st.warning("⚠️ Skład ETF zmienia się w czasie (tzw. rebalancing).")
 
 # ------------------------------------------
 # MODUŁ 3: LABORATORIUM DYWERSYFIKACJI
@@ -324,7 +310,6 @@ with tab3:
     **Współczynnik korelacji** (od -1 do 1) pomoże Ci ocenić, czy Twój portfel jest bezpieczny podczas kryzysu.
     """)
     
-    # Lista opcji z uwzględnieniem prawdziwych ETFów
     options_list = list(REAL_ETFS.keys())
     if MAIN_TICKER in options_list:
         options_list.remove(MAIN_TICKER)
@@ -339,26 +324,29 @@ with tab3:
         with st.spinner("Obliczanie macierzy korelacji..."):
             corr_matrix = calculate_correlations(MAIN_TICKER, compare_tickers, start_date, end_date)
             
-            fig_corr = px.imshow(corr_matrix, 
-                                 text_auto=".2f", 
-                                 aspect="auto",
-                                 color_continuous_scale="RdBu_r",
-                                 zmin=-1, zmax=1,
-                                 title="Macierz Korelacji Dziennych Stóp Zwrotu")
-            st.plotly_chart(fig_corr, use_container_width=True)
-            
-            col_desc, col_legend = st.columns([2, 1])
-            with col_desc:
-                st.markdown("### 📖 Jak czytać tę macierz?")
-                st.write("- **Blisko +1.0 (Kolor Czerwony):** Aktywa poruszają się identycznie. Brak dywersyfikacji (np. SPY i QQQ często mają korelacje > 0.8).")
-                st.write("- **Około 0.0 (Kolor Biały):** Brak związku. Dobry dodatek do portfela (często Złoto - GLD).")
-                st.write("- **Blisko -1.0 (Kolor Niebieski):** Aktywa poruszają się w przeciwnych kierunkach. Świetne zabezpieczenie na czas krachów (np. Obligacje Długoterminowe - TLT w czasie spadków akcji).")
-            
-            with col_legend:
-                st.markdown("### 🏷️ Legenda Tickerów:")
-                for tick, desc in REAL_ETFS.items():
-                    if tick == MAIN_TICKER or tick in compare_tickers:
-                        st.caption(f"**{tick}**: {desc}")
+            if not corr_matrix.empty:
+                fig_corr = px.imshow(corr_matrix, 
+                                     text_auto=".2f", 
+                                     aspect="auto",
+                                     color_continuous_scale="RdBu_r",
+                                     zmin=-1, zmax=1,
+                                     title="Macierz Korelacji Dziennych Stóp Zwrotu")
+                st.plotly_chart(fig_corr, use_container_width=True)
+                
+                col_desc, col_legend = st.columns([2, 1])
+                with col_desc:
+                    st.markdown("### 📖 Jak czytać tę macierz?")
+                    st.write("- **Blisko +1.0 (Czerwony):** Brak dywersyfikacji (aktywa zachowują się tak samo).")
+                    st.write("- **Około 0.0 (Biały):** Brak związku. Dobry dodatek do portfela.")
+                    st.write("- **Blisko -1.0 (Niebieski):** Świetne zabezpieczenie na czas krachów.")
+                
+                with col_legend:
+                    st.markdown("### 🏷️ Legenda Tickerów:")
+                    for tick, desc in REAL_ETFS.items():
+                        if tick == MAIN_TICKER or tick in compare_tickers:
+                            st.caption(f"**{tick}**: {desc}")
+            else:
+                st.error("Nie udało się obliczyć korelacji - brak wystarczających danych dla wybranej grupy.")
     else:
         st.warning("Wybierz przynajmniej jedno aktywo do porównania.")
 
@@ -380,14 +368,13 @@ with tab4:
             st.subheader("Oryginalne dane (Pierwsze 3 wiersze)")
             st.dataframe(df_uploaded.head(3))
             
-            with st.spinner("Procesowanie (maskowanie ID, skalowanie kwot)..."):
+            with st.spinner("Procesowanie..."):
                 df_clean = anonymize_csv(df_uploaded)
                 
             st.success("✅ Dane zostały zanonimizowane.")
             st.subheader("Wynik po anonimizacji")
             st.dataframe(df_clean.head(5))
             
-            # Pobieranie przetworzonego pliku
             csv = df_clean.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="Pobierz zanonimizowany plik CSV",
@@ -406,9 +393,7 @@ st.markdown(
     """
     <div style='text-align: center; color: gray; font-size: 0.8em;'>
     <strong>Disclaimer Prawny:</strong> Narzędzie ma charakter wyłącznie edukacyjny i nie stanowi doradztwa inwestycyjnego 
-    w rozumieniu Dyrektywy MiFID II (Markets in Financial Instruments Directive). Symulacje, analizy sentymentu oraz 
-    dane korelacyjne są uproszczonymi modelami i nie gwarantują przyszłych rezultatów na rynkach finansowych.
-    Inwestowanie wiąże się z ryzykiem utraty kapitału.
+    w rozumieniu Dyrektywy MiFID II (Markets in Financial Instruments Directive).
     <br><br>
     Zbudowane przy użyciu: Streamlit, YFinance & Plotly | Stworzone przez: Senior Python Developer / FinEdu
     </div>
