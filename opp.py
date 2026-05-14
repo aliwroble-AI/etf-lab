@@ -33,7 +33,7 @@ def fetch_data(tickers, start, end, regime="neutral"):
         inflation_factor = np.random.normal(0, 0.01, len(dates))
         
         for ticker in tickers:
-            if ticker in:
+            if ticker in or ticker.startswith('XL'):
                 if regime == "inflation":
                     returns = market_factor - inflation_factor * 1.5 + np.random.normal(0, 0.005, len(dates))
                 elif regime == "ai_boom" and ticker == 'QQQ':
@@ -57,7 +57,7 @@ def fetch_data(tickers, start, end, regime="neutral"):
 # --- NAWIGACJA (SIDEBAR) ---
 st.sidebar.title("Nawigacja")
 st.sidebar.markdown("Wybierz moduł analityczny:")
-modul = st.sidebar.radio("",)
+modul = st.sidebar.radio("Wybierz:",)
 
 # --- MODUŁ 1: ANATOMIA KRYZYSÓW ---
 if modul == "1. Anatomia Kryzysów i Przełomów":
